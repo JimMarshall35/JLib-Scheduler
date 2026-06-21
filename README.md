@@ -114,7 +114,7 @@ Assign tasks to a thread-local queue:
 
 you can also directly type in a lambda instead of a task, but it will not be tracked unless you specifically
 
-save it as a task or lambdatask object 
+save it as a task or lambdatask object. auto works since you will just CreateTask() and its compatible with both
 
 -------------
 Priority Tasks
@@ -135,13 +135,6 @@ Fork a task outside the pool:
 
 Forked tasks temporarily remove the thread from the pool. Any local work is redistributed before forking. Stop the worker to rejoin the pool.
 
-Lambda Tasks
-
-All submit methods accept lambda expressions, they do not track tasks and will simply be added to the garbage graveyard upon completion. you can store a new LambdaTask and track it that way.
-
-	scheduler.SubmitLocal([](){ std::cout << "Lambda task running!" << std::endl; });
-
-	scheduler.SubmitLocal(1, [](){ std::cout << "Pinned lambda!" << std::endl; });
 
 to stop a forked task 
 
@@ -175,6 +168,35 @@ To track completion safely, keep tasks in a vector and delete them after all tas
             std::this_thread::yield();
         }
 		scheduler.WaitAll(tasks);
+
+
+------------
+Parallel For
+------------
+
+Define a function or lambda with two ints, (start and end) and call 
+ParallelFor(start,end,chunksize,func(int,int)) and it will distribute it
+amongst the threads.
+
+	// The function signature usually looks like this:
+	// void(int start, int end)
+
+	scheduler.ParallelFor(0, 10000, 128, [&](int start, int end) {
+    		// This code runs in parallel on different threads!
+   		 for (int i = start; i < end; ++i) {
+      		  UpdateEntity(i);
+    		}
+		});
+
+	auto myPhysicsWork = [&](int start, int end) {
+    		for (int i = start; i < end; ++i) {
+       		 // This is your standard entity update logic
+       		 UpdateParticle(i); 
+    		}
+	};
+
+// 2. The scheduler handles the "How" (Partitioning the range 0-1000)
+scheduler.ParallelFor(0, 1000, 128, myPhysicsWork);
 
 -----------------
 Memory Management

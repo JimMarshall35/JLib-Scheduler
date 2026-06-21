@@ -19,6 +19,8 @@ namespace T_Threads {
 		void ProcessMainThread();
 		void Join();
 		void NotifyAll();
+		void ParallelForBlocking(int start, int end, int chunkSize, std::function<void(int, int)> func);
+		void ParallelFor(int start, int end, int chunkSize, std::function<void(int, int)> func);
 		bool SubmitLocal(Task* task);
 		bool SubmitLocal(uint8_t cpu_affinity, Task* task);
 		bool SubmitPQ(Task* task);

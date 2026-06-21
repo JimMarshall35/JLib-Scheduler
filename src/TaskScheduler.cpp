@@ -49,6 +49,55 @@ void T_Threads::TaskScheduler::NotifyAll()
 	for (int i = 0; i < workers.size(); i++)
 		workers[i]->NotifyWorker();
 }
+void T_Threads::TaskScheduler::ParallelForBlocking(int start, int end, int chunkSize, std::function<void(int, int)> func)
+{
+	int totalItems = end - start;
+	int numTasks = (totalItems + chunkSize - 1) / chunkSize;
+
+	// Create a "Counter" that tracks when all chunks are done
+	std::atomic<int> counter{ numTasks };
+
+	for (int i = 0; i < numTasks; ++i) {
+		int chunkStart = start + i * chunkSize;
+		int chunkEnd = std::min(chunkStart + chunkSize, end);
+
+		// Push a task to your scheduler that does a slice of the work
+		this->SubmitLocal([=, &counter]() {
+			func(chunkStart, chunkEnd);
+
+			// If this was the last chunk, trigger whatever should happen next
+			if (--counter == 0) {
+				// All chunks finished!
+			}
+			});
+	}
+	while (counter.load(std::memory_order_acquire) > 0) {
+		std::this_thread::yield();
+	}
+}
+void T_Threads::TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function<void(int, int)> func)
+{
+	int totalItems = end - start;
+	int numTasks = (totalItems + chunkSize - 1) / chunkSize;
+
+	// Create a "Counter" that tracks when all chunks are done
+	std::atomic<int> counter{ numTasks };
+
+	for (int i = 0; i < numTasks; ++i) {
+		int chunkStart = start + i * chunkSize;
+		int chunkEnd = std::min(chunkStart + chunkSize, end);
+
+		// Push a task to your scheduler that does a slice of the work
+		this->SubmitLocal([=, &counter]() {
+			func(chunkStart, chunkEnd);
+
+			// If this was the last chunk, trigger whatever should happen next
+			if (--counter == 0) {
+				// All chunks finished!
+			}
+		});
+	}
+}
 void TaskScheduler::StartPool(size_t poolSize) {
 	std::lock_guard<std::mutex> lock(poolMutex);
 	if (poolSize > std::thread::hardware_concurrency() - 1)
