@@ -71,21 +71,53 @@ void TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function
 
 	int numTasks = (totalItems + chunkSize - 1) / chunkSize;
 
-	std::vector<Task*> activeTasks;
+	// Holds only the tasks we successfully allocated.
+	Task** taskPtrs = new Task * [numTasks];
+	int created = 0;
+
+	// 1. Create tasks. If the arena is exhausted (CreateTask returns nullptr),
+	//    run that chunk inline on the caller rather than dereferencing null.
 	for (int i = 0; i < numTasks; ++i) {
 		int chunkStart = start + i * chunkSize;
 		int chunkEnd = std::min(chunkStart + chunkSize, end);
-		auto t = CreateTask([=]() { func(chunkStart, chunkEnd); });
-		Push(t);
-		activeTasks.push_back(t);
-	}
-	NotifyAll();
 
-	for (auto* t : activeTasks) {
-		if (!t) continue;
-		while (!t->complete.load(std::memory_order_acquire))
-			std::this_thread::yield();
+		Task* t = CreateTask([=]() { func(chunkStart, chunkEnd); });
+		if (!t) {
+			func(chunkStart, chunkEnd); // graceful degradation: do it here
+			continue;
+		}
+		taskPtrs[created++] = t;
 	}
+
+	if (created > 0) {
+		// 2. Intrusively chain the created tasks and submit as one batch.
+		for (int i = 0; i < created - 1; ++i) {
+			taskPtrs[i]->next.store(taskPtrs[i + 1], std::memory_order_relaxed);
+		}
+		taskPtrs[created - 1]->next.store(nullptr, std::memory_order_relaxed);
+
+		int chosen = PickNextWorker();
+		while (immediateCoresInUse[chosen]->load(std::memory_order_acquire)) {
+			chosen = PickNextWorker();
+		}
+		runningTasks.fetch_add(created, std::memory_order_relaxed);
+
+		inboxes[chosen]->push_batch(taskPtrs[0], taskPtrs[created - 1], created);
+		workers[chosen]->NotifyWorker();
+
+		// 3. Wait for completion of this batch.
+		for (int i = 0; i < created; ++i) {
+			while (!taskPtrs[i]->complete.load(std::memory_order_acquire)) {
+				std::this_thread::yield();
+			}
+		}
+	}
+
+	delete[] taskPtrs;
+
+	// 4. Batch is done and no longer referenced by us. Recycle the arena it
+	//    came from — but only if the whole system is quiescent (see RecycleArena).
+	RecycleArena();
 }
 void TaskScheduler::ParallelForNB(int start, int end, int chunkSize, std::function<void(int, int)> func) {
 	chunkSize = std::max(1, chunkSize);
@@ -112,8 +144,8 @@ void TaskScheduler::StartPool(size_t poolSize) {
 	stopFlag.store(false, std::memory_order_release);
 	nextWorker = 0;
 
-	const size_t fibersPerWorker = 8;
-	fiberPool = std::make_unique<FiberPool>(num_workers * fibersPerWorker);
+	const size_t fibersPerWorker = 64;
+	globalPool = std::make_unique<FiberPool>(num_workers * fibersPerWorker);
 
 	workers.clear();
 	threadQs.clear();
@@ -141,6 +173,7 @@ void TaskScheduler::StartPool(size_t poolSize) {
 	}
 	poolActive.store(true, std::memory_order_release);
 }
+
 void TaskScheduler::WaitOnEvent(const std::string& eventName) {
 	auto* thread = T_Thread::GetCurrent();
 	Task* myTask = thread->currentRunningTask;
@@ -154,15 +187,16 @@ void TaskScheduler::WaitOnEvent(const std::string& eventName) {
 bool TaskScheduler::Push(Task* task) {
 	return PushLocal(task);
 }
+
+bool T_Threads::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity = 0)
+{
+	return PushBatchLocal(tasks, count, cpuaffinity);
+}
+
 bool TaskScheduler::Push(uint8_t cpu_affinity, Task* task) {
 	return PushLocal(task, cpu_affinity);
 }
-bool TaskScheduler::PushPQ(Task* task) {
-	return PushToPQ(task);
-}
-bool TaskScheduler::PushPQ(uint8_t priority, Task* task) {
-	return PushToPQ(task, priority);
-}
+
 bool TaskScheduler::PushFork(uint8_t cpu_affinity, Task* task) {
 	if (!task) return false;
 	return Push(cpu_affinity, task);
@@ -188,25 +222,18 @@ Task* TaskScheduler::GetTask() {
 	Task* task_to_run = nullptr;
 	Task* task;
 
-	for (int i = 0; i < 5; i++) {
-		if (priorityQ[i].try_dequeue(task)) {
-			task_to_run = task;
+	size_t numThreads = threadQs.size();
+	size_t start = rand() % numThreads;
+	for (size_t i = 0; i < numThreads; ++i) {
+		size_t target = (start + i) % numThreads;
+		auto opt = threadQs[target]->steal();
+		if (opt) {
+			task_to_run = *opt;
+			current_task = task_to_run;
 			break;
 		}
 	}
-	if (!task_to_run) {
-		size_t numThreads = threadQs.size();
-		size_t start = rand() % numThreads;
-		for (size_t i = 0; i < numThreads; ++i) {
-			size_t target = (start + i) % numThreads;
-			auto opt = threadQs[target]->steal();
-			if (opt) {
-				task_to_run = *opt;
-				current_task = task_to_run;
-				break;
-			}
-		}
-	}
+
 	return task_to_run;
 }
 void TaskScheduler::Wait(const std::vector<Task*>& tasks) {
@@ -221,6 +248,8 @@ void TaskScheduler::Wait(const std::vector<Task*>& tasks) {
 				std::this_thread::yield();
 		}
 	}
+	// Tasks waited on are done; recycle if the system is quiescent.
+	RecycleArena();
 }
 void TaskScheduler::WaitAll() {
 	while (runningTasks.load(std::memory_order_acquire) > 0)
@@ -229,6 +258,33 @@ void TaskScheduler::WaitAll() {
 Arena* TaskScheduler::GetArena() {
 	return taskArena.GetActive();
 }
+void TaskScheduler::RecycleArena() {
+	// Recycle the active task arena, but ONLY at a true quiescence point.
+	// runningTasks==0 is strictly stronger than every task's `complete` flag:
+	// a worker writes task->assignedFiber = nullptr (into the arena) AFTER it
+	// leaves its epoch but BEFORE it decrements runningTasks. Waiting for the
+	// counter to hit 0 guarantees every worker has finished touching the task
+	// memory, and that no other producer has tasks in flight in this arena.
+	// If the system isn't quiescent we simply defer recycling (no crash, just
+	// no reclaim until it is). Retire-at-epoch + Tick() further defers the
+	// actual clear() until all workers have advanced past this epoch.
+	//
+	// Bounded spin: at a fork-join barrier the per-task `complete` flag is set
+	// inside Execute, but the worker drives runningTasks to 0 a little later in
+	// its loop tail. Give it a moment to settle so the common (sole-producer)
+	// case actually reclaims; bail out if another producer keeps work in flight.
+	for (int spins = 0; spins < 4096; ++spins) {
+		if (runningTasks.load(std::memory_order_acquire) == 0) break;
+		std::this_thread::yield();
+	}
+	if (runningTasks.load(std::memory_order_acquire) != 0) return;
+
+	size_t epoch = EpochManager::Instance().CurrentEpoch();
+	Arena* active = taskArena.GetActive();
+	EpochManager::Instance().RetireArena(active, epoch);
+	taskArena.Rotate();
+	EpochManager::Instance().Tick();
+}
 Task* TaskScheduler::CreateTask(void(*fn)(void*), void* data) {
 	void* mem = taskArena.GetActive()->allocate(sizeof(Task));
 	if (!mem) return nullptr;
@@ -236,6 +292,18 @@ Task* TaskScheduler::CreateTask(void(*fn)(void*), void* data) {
 }
 void* TaskScheduler::AllocateFromArena(size_t size) {
 	return taskArena.GetActive()->allocate(size);
+}
+
+bool TaskScheduler::PushBatchLocal(Task* tasks[], size_t count, uint8_t cpuaffinity) {
+	// 1. Manually link them locally: Task A -> Task B -> Task C
+	for (size_t i = 0; i < count - 1; ++i) {
+		tasks[i]->next.store(tasks[i + 1], std::memory_order_relaxed);
+	}
+	// The last task's next is already handled by the queue's exchange logic
+
+	// 2. Submit the pointers directly - NO wrappers, NO heap allocation
+	inboxes[cpuaffinity - 1]->push_batch(tasks[0], tasks[count - 1], count);
+	return true;
 }
 bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 	if (!task) return false;
@@ -254,19 +322,13 @@ bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 	else {
 		runningTasks.fetch_add(1, std::memory_order_relaxed);
 		uint8_t chosen = PickNextWorker();
+		while (immediateCoresInUse[chosen]->load(std::memory_order_acquire)) {
+			chosen = PickNextWorker();
+		}
 		inboxes[chosen]->push(task);
-		NotifyAll();
-	}
-	return true;
-}
-bool TaskScheduler::PushToPQ(Task* task, uint8_t priority) {
-	if (priority > 4) priority = 4;
-	if (!task) return false;
+		workers[chosen]->NotifyWorker();
 
-	runningTasks.fetch_add(1, std::memory_order_relaxed);
-	if (!priorityQ[priority].try_enqueue(task))
-		runningTasks.fetch_sub(1, std::memory_order_relaxed);
-	NotifyAll();
+	}
 	return true;
 }
 bool TaskScheduler::PushToCore(size_t core_id, Task* task) {

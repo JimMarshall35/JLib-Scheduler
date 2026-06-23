@@ -2,26 +2,23 @@
 #include <atomic>
 #include <memory>
 #include <iostream>
+#include "Task.h"
 
 namespace T_Threads {
+	// T is Task*
 	template <typename T>
 	class MPSCQueue {
 	private:
-		struct Node {
-			T data_;
-			std::atomic<Node*> next_;
-			Node(T d = T()) : data_(d), next_(nullptr) {}
-		};
+		// REMOVED struct Node entirely
 
-		std::atomic<Node*> tail_;
-		Node* head_;
-		std::atomic<size_t> size_;
-		std::atomic<int> nodesPushed{ 0 };
+		std::atomic<T> tail_;
+		T head_; // Dummy/Sentinel Task*
+
 	public:
 		MPSCQueue() {
-			head_ = new Node();
+			head_ = new Task(); // A dummy task
+			head_->next.store(nullptr, std::memory_order_relaxed);
 			tail_.store(head_, std::memory_order_relaxed);
-			size_ = 0;
 		}
 
 		~MPSCQueue() {
@@ -29,43 +26,46 @@ namespace T_Threads {
 			delete head_;
 		}
 
-		void push(const T& item) {
-			Node* node = new Node(item);
-			Node* prev = tail_.exchange(node, std::memory_order_acq_rel);
-			prev->next_.store(node, std::memory_order_release);
-			size_.fetch_add(1, std::memory_order_release);
+		// Push accepts Task* directly
+		void push(T task) {
+			task->next.store(nullptr, std::memory_order_relaxed);
+			T prev = tail_.exchange(task, std::memory_order_acq_rel);
+			prev->next.store(task, std::memory_order_release);
 		}
 
+		// Batch push accepts Task* pointers
+		void push_batch(T head_batch, T tail_batch, size_t count) {
+			tail_batch->next.store(nullptr, std::memory_order_relaxed);
+			T prev = tail_.exchange(tail_batch, std::memory_order_acq_rel);
+			prev->next.store(head_batch, std::memory_order_release);
+		}
 
 		bool pop(T& out_result) {
-			Node* head = head_;
-			Node* next = head->next_.load(std::memory_order_acquire);
+			T head = head_;
+			T next = head->next.load(std::memory_order_acquire);
 
 			if (!next) {
-				// Check if a push is in flight: tail moved but link not yet written
-				if (tail_.load(std::memory_order_acquire) == head) {
-					return false; // truly empty
-				}
-				// PushToCore is in progress — spin until the link is visible
-				while (!(next = head->next_.load(std::memory_order_acquire))) {
+				if (tail_.load(std::memory_order_acquire) == head) return false;
+				while (!(next = head->next.load(std::memory_order_acquire))) {
 					std::this_thread::yield();
 				}
 			}
 
-			out_result = next->data_;
+			out_result = next;
 			head_ = next;
-			delete head;
-			size_.fetch_sub(1, std::memory_order_relaxed);
+			// Note: Do NOT delete head_ here if it's a Task*
 			return true;
-		}
-
-		bool empty() const {
-			return head_ == tail_.load(std::memory_order_acquire);
 		}
 
 		void clear() {
 			T dummy;
 			while (pop(dummy)) {}
+		}
+		bool empty() const {
+			// 1. Get the current head
+			// 2. The queue is empty if head->next_ is null
+			//    AND tail_ points to the sentinel head_
+			return head_->next.load(std::memory_order_acquire) == nullptr;
 		}
 	};
 };

@@ -14,6 +14,8 @@ namespace T_Threads {
         std::function<void()> onComplete;
         std::atomic<bool> complete{ false };
         std::atomic<bool> callbackFlag{ false };
+        std::atomic<Task*> next{ nullptr };
+        Task() : next(nullptr), complete(false), fn(nullptr), data(nullptr), assignedFiber(nullptr) {}
         Task(Func f, void* d = nullptr)
             : fn(f), data(d) {
         }

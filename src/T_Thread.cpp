@@ -74,10 +74,6 @@ bool T_Thread::AllQueuesEmpty() {
 		if (!q->empty())
 			return false;
 	}
-	for (int i = 0; i < 5; ++i) {
-		if (scheduler->priorityQ[i].size_approx() > 0)
-			return false;
-	}
 	return true;
 }
 bool T_Thread::Ready()
@@ -91,6 +87,30 @@ void T_Thread::OnFinishedArena(ArenaPool* arena) {
 	scheduler->taskArena.Rotate();
 	EpochManager::Instance().Tick();
 }
+Fiber* T_Thread::AcquireFiber() {
+	// Fast path: Take from local cache (no lock!)
+	if (!localFiberCache.empty()) {
+		Fiber* f = localFiberCache.back();
+		localFiberCache.pop_back();
+		return f;
+	}
+
+	// Slow path: Lock the global pool and steal a batch
+	std::lock_guard<std::mutex> lock(scheduler->globalPoolMutex);
+	for (size_t i = 0; i < BATCH_SIZE; ++i) {
+		if (Fiber* f = scheduler->globalPool->Acquire()) {
+			localFiberCache.push_back(f);
+		}
+	}
+
+	// Return one from the newly replenished cache
+	if (!localFiberCache.empty()) {
+		Fiber* f = localFiberCache.back();
+		localFiberCache.pop_back();
+		return f;
+	}
+	return nullptr; // Pool truly exhausted
+}
 void T_Thread::Worker() {
 	running.store(true, std::memory_order_release);
 	while (running.load(std::memory_order_acquire)) {
@@ -98,7 +118,7 @@ void T_Thread::Worker() {
 		{
 			ready.store(true, std::memory_order_release);
 			std::unique_lock<std::mutex> lock(workerMutex);
-			cv.wait_for(lock, std::chrono::microseconds(5), [this]() {
+			cv.wait_for(lock, std::chrono::milliseconds(1), [this]() {
 				return !running.load(std::memory_order_acquire)
 					|| immediate.load(std::memory_order_acquire)
 					|| (!scheduler->paused.load(std::memory_order_acquire) && !AllQueuesEmpty());
@@ -201,16 +221,7 @@ void T_Thread::Worker() {
 				}
 			}
 		}
-		if (!task_to_run) {
-			// --- 5. Priority Queue ---
-			Task* task;
-			for (int i = 0; i < 5; i++) {
-				if (scheduler->priorityQ[i].try_dequeue(task)) {
-					task_to_run = task;
-					break;
-				}
-			}
-		}
+	
 
 		// --- 6. Execute task if found ---
 		if (task_to_run) {
@@ -222,7 +233,7 @@ void T_Thread::Worker() {
 			if (resuming) {
 				f = existingFiber;
 			} else {
-				f = scheduler->fiberPool->Acquire();
+				f = AcquireFiber();
 				if (!f) {
 					std::cerr << "CRITICAL: Fiber pool exhausted!" << std::endl;
 					scheduler->threadQs[qIndex]->push_bottom(task_to_run);
@@ -245,7 +256,7 @@ void T_Thread::Worker() {
 				currentFiber = nullptr;
 				currentRunningTask = nullptr;
 			} else {
-				scheduler->fiberPool->Release(f);
+				scheduler->globalPool->Release(f);
 				task_to_run->assignedFiber = nullptr;
 				currentFiber = nullptr;
 				currentRunningTask = nullptr;
@@ -258,9 +269,9 @@ void T_Thread::Worker() {
 				is_handling_fork = false;
 			}
 
-			if (scheduler->runningTasks.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-				OnFinishedArena(&scheduler->taskArena);
-			}
+			
+			scheduler->runningTasks.fetch_sub(1, std::memory_order_acq_rel);
+
 			if (retired.size() > 512) {
 				EpochManager::Instance().Tick();
 			}

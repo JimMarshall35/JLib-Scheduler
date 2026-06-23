@@ -63,10 +63,5 @@ void TaskDAG::SubmitToScheduler(TaskNode* node) {
         else
             scheduler.Push(node->cpuID, node->task);
     }
-    else {
-        if (node->priority == 0)
-            scheduler.PushPQ(node->task);
-        else
-            scheduler.PushPQ(node->priority, node->task);
-    }
+  
 }

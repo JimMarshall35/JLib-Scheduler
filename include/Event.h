@@ -19,8 +19,11 @@ namespace T_Threads {
         // Wake up one specific task
         void Signal(Task* t) {
             std::lock_guard<std::mutex> lock(mtx);
-            if (waiters.erase(t)) { // Returns 1 if found and removed
-                t->assignedFiber->status.store(FiberStatus::READY, std::memory_order_release);
+            if (waiters.erase(t)) {
+                // Leave status as SUSPENDED — Worker checks for SUSPENDED to
+                // resume the existing fiber context. Changing it to READY here
+                // would make Worker treat this as a new task, overwrite
+                // assignedFiber, and call Init() on the live suspended stack.
                 TaskScheduler::Instance().Push(t);
             }
         }
@@ -29,7 +32,6 @@ namespace T_Threads {
         void SignalAll() {
             std::lock_guard<std::mutex> lock(mtx);
             for (auto* t : waiters) {
-                t->assignedFiber->status.store(FiberStatus::READY, std::memory_order_release);
                 TaskScheduler::Instance().Push(t);
             }
             waiters.clear();

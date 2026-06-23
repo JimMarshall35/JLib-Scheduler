@@ -18,8 +18,8 @@ void forkedTask(void* data) {
 
         ctr = (ctr + 1) % 5;
         int capturedCtr = ctr; // new variable per iteration
-        TaskScheduler::Instance().PushPQ(ctr, [ctr]() {
-            std::cout << "priority: " << ctr << std::endl;
+        TaskScheduler::Instance().Push(ctr, [ctr]() {
+            std::cout << "ctr: " << ctr << std::endl;
             });
   
         std::this_thread::sleep_for(std::chrono::milliseconds(10));

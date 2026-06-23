@@ -4,14 +4,16 @@
 #include "Epochs.h"
 #include "FiberStackArena.h"
 #include <vector>
+#include <mutex>
 #include "platform.h"
 namespace T_Threads {
     class Scheduler; // Just tell the compiler this exists
 
     class FiberPool {
         FiberStackArena arena;
-        Stack<Fiber*> freeStack;
-        std::vector<Fiber> allFibers; // To keep them alive
+        std::vector<Fiber> allFibers;   // owns the fibers (stable addresses)
+        std::vector<Fiber*> freeList;   // available fibers
+        std::mutex freeMutex;           // guards freeList
 
     public:
         FiberPool(int count);

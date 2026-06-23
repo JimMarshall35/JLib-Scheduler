@@ -4,24 +4,32 @@
 using namespace T_Threads;
 void Fiber::Init(void(*entryPoint)())
 {
-	uintptr_t* stackPtr = (uintptr_t*)((uintptr_t)((char*)stackBase + stackSize) & ~0xF);
+	// 16-byte-align the very top of this fiber's stack.
+	uintptr_t top = ((uintptr_t)((char*)stackBase + stackSize)) & ~(uintptr_t)0xF;
+	uintptr_t* sp = (uintptr_t*)top;
 
-	// Windows x64: RSP must be 8 mod 16 at function entry. 'ret' pops 8 bytes,
-	// so the entryPoint slot must sit at an address that is 0 mod 16. stackTop is
-	// 0 mod 16, so push a dummy first to put entryPoint at stackTop-16 (also 0 mod 16).
-	// After ret: RSP = stackTop-8 (8 mod 16). Correct.
-	*(--stackPtr) = 0;                      // alignment dummy
-	*(--stackPtr) = (uintptr_t)entryPoint;  // ret address
-	*(--stackPtr) = 0; // rbx
-	*(--stackPtr) = 0; // rbp
-	*(--stackPtr) = 0; // rdi
-	*(--stackPtr) = 0; // rsi
-	*(--stackPtr) = 0; // r12
-	*(--stackPtr) = 0; // r13
-	*(--stackPtr) = 0; // r14
-	*(--stackPtr) = 0; // r15  <-- RSP points here after ContextSwitch loads it
+	// Windows x64 ABI: the CALLER must leave 32 bytes of shadow space ABOVE the
+	// return address for the callee to spill its register params. When
+	// ContextSwitch 'ret's into entryPoint, that shadow space is whatever sits
+	// above the entry RSP. Reserve it HERE, inside this fiber's own stack --
+	// otherwise the entry function writes past stackTop, which is either the
+	// next fiber's base (silent corruption) or, for the last fiber, unmapped
+	// memory (0xC0000005 write AV at the stack-region boundary).
+	sp -= 4;                              // 32 bytes shadow space (owned by this fiber)
+	*(--sp) = 0;                          // landing slot: entry RSP points here (unused)
+	*(--sp) = (uintptr_t)entryPoint;      // return address consumed by ContextSwitch 'ret'
 
-	ctx.rsp = (void*)stackPtr;
+	// 8 callee-saved registers consumed by ContextSwitch's pops (r15 is lowest).
+	*(--sp) = 0; // rbx
+	*(--sp) = 0; // rbp
+	*(--sp) = 0; // rdi
+	*(--sp) = 0; // rsi
+	*(--sp) = 0; // r12
+	*(--sp) = 0; // r13
+	*(--sp) = 0; // r14
+	*(--sp) = 0; // r15  <-- ctx.rsp; ContextSwitch starts popping here
+
+	ctx.rsp = (void*)sp;
 }
 
 void T_Threads::Fiber::CoYield() {

@@ -17,6 +17,10 @@ namespace T_Threads {
         Fiber* fiber;
         std::atomic<bool> signaled{ false }; // Did the event occur?
     };
+    struct AcquireWorkRes {
+        Task* task;
+        bool isImmediate;
+    };
     class T_Thread {
     public:
         static thread_local T_Thread* self;
@@ -40,11 +44,18 @@ namespace T_Threads {
         void NotifyWorker();
         bool AllQueuesEmpty();
         bool Ready();
-        void OnFinishedArena(ArenaPool* arena);
     private:
+        void OnFinishedArena(ArenaPool* arena);
+        Fiber* AcquireFiber();
+        void WaitBackoff(int& spin_count);
+        void ExecuteTask(Task* task);
+        AcquireWorkRes TryAcquireWork();
+
         void Worker();
 
         TaskScheduler* scheduler;
+        std::vector<Fiber*> localFiberCache;
+        const size_t BATCH_SIZE = 32;
 		Stack<Fiber*> SuspendedFibers;
         std::atomic<int> qLoad{ 0 };
         std::atomic<bool> immediate{ false };
