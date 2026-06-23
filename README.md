@@ -1,6 +1,6 @@
 # T_Threads
 
-A high-performance, lightweight C++17 fibers-based task scheduler / job system with thread affinity, work-stealing queues, and priority support.
+A high-performance, lightweight C++17 fibers-based task scheduler / job system with thread affinity, and work-stealing queues
 
 ---
 
