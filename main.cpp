@@ -90,6 +90,7 @@ void MyWorkFunction(int start, int end) {
 }
 
 int main() {
+    T_Threads::TaskScheduler::Init();
     auto& scheduler = T_Threads::TaskScheduler::Instance();
 
     int start = 0;

@@ -1,9 +1,31 @@
 #include "../include/TaskScheduler.h"
 #include "../include/Event.h"
 using namespace T_Threads;
+TaskScheduler* TaskScheduler::instance = nullptr;
+
 TaskScheduler::TaskScheduler(size_t poolSize) {
 	StartPool(poolSize);
 };
+size_t TaskScheduler::GetSafeTC() {
+	unsigned int cores = std::thread::hardware_concurrency();
+
+	// Fallback if system reports 0 cores
+	if (cores == 0) return 1;
+
+	// Ensure we don't underflow if cores == 1
+	if (cores == 1) return 1;
+
+	// Safe to subtract
+	return static_cast<size_t>(cores - 1);
+}
+ void TaskScheduler::Init(size_t poolSize) {
+	if (instance != nullptr) {
+		// Option 1: Log a warning
+		// Option 2: Throw an exception (better for debugging)
+		throw std::runtime_error("TaskScheduler already initialized!");
+	}
+	instance = new TaskScheduler(poolSize);
+}
 TaskScheduler::~TaskScheduler() {
 	if (!stopFlag) {
 		Join();
@@ -113,21 +135,23 @@ void T_Threads::TaskScheduler::ParallelForNB(int start, int end, int chunkSize, 
 void TaskScheduler::StartPool(size_t poolSize) {
 	std::lock_guard<std::mutex> lock(poolMutex);
 
-	if (poolSize > std::thread::hardware_concurrency() - 1)
-		poolSize = std::thread::hardware_concurrency() - 1;
-	unsigned int hw = std::thread::hardware_concurrency();
-	if (hw == 0)
-		hw = 4; // or whatever default you prefer
+	size_t safeLimit = GetSafeTC();
 
-	unsigned int maxWorkers = std::max(1u, hw - 1u);
-	EpochManager::Instance().Init(maxWorkers);
+	// 1. If user passes 0, use the safe default
+	if (poolSize == 0) {
+		poolSize = safeLimit;
+	}
 
-	if (poolSize > maxWorkers)
-		poolSize = maxWorkers;
-
+	// 2. Clamp to the safe limit. 
+	// This respects the user's input, but enforces the engine's 
+	// performance policy if they try to oversubscribe.
+	if (poolSize > safeLimit) {
+		poolSize = safeLimit;
+	}
+	unsigned int num_workers = static_cast<unsigned int>(poolSize);
+	EpochManager::Instance().Init(num_workers);
 	stopFlag.store(false, std::memory_order_release);
 	nextWorker = 0;
-	unsigned int num_workers = poolSize;
 	const size_t fibersPerWorker = 8;
 	size_t totalFibers = num_workers * fibersPerWorker;
 	SharedQueues::fiberPool = std::make_unique<FiberPool>(totalFibers);

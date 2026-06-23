@@ -64,17 +64,23 @@ Usage
 ----------------------
 Starting the Scheduler
 ----------------------
-	TaskScheduler& scheduler = TaskScheduler::Instance();
+before anything else you must initialize the scheduler;
 
-	scheduler.StartPool(uint8_t clock_worker);  // Launches worker threads
+by default it will spawn the max number of cores (1 worker per core, if you want two the source has to be adjusted for specific use cases) but you can input any number of workers you like and the scheduler will respect it as long as it fits the core count * 1. 
 
-you must choose a core to run the clock and heap to notify workers and run periodic and delayed tasks
+run
 
-The pool runs automatically and can optionally be joined:
+	T_Threads::TaskScheduler::Init(/*optional number of workers/cores*/)
+
+	T_Threads::TaskScheduler& scheduler = TaskScheduler::Instance();
+
+
+
+The pool will join automatically at the end of the program and can optionally be joined: this is very expensive though and you would have to restart the pool with scheduler.StartPool(poolSize) to start it again.
 
 	scheduler.Join();  // Stops all workers and joins threads
 
-the pool will automatically rejoin on program exit -- HOWEVER any forked workers must be manually stopped by holding a reference to the task they run with the stop() function in the task->stop() otherwise it will hang on exit, once stopped they will rejoin the pool
+the pool will automatically rejoin on program exit -- HOWEVER any forked workers must be manually stopped by holding a reference to the task they run with the stop() function in the task->stop() otherwise it will hang on exit, once stopped they will rejoin the pool. 
 
 --------------
 Creating Tasks

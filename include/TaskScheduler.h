@@ -13,9 +13,12 @@ namespace T_Threads {
 	class TaskScheduler {
 	public:
 		static TaskScheduler& Instance() {
-			static TaskScheduler instance;
-			return instance;
+			if (!instance) {
+				throw std::runtime_error("Call Initialize() before Instance()!");
+			}
+			return *instance;
 		}
+		static void Init(size_t poolSize = GetSafeTC());
 		~TaskScheduler();
 		bool EnqueueToMain(Task* task);
 		void ProcessMainThread();
@@ -76,13 +79,15 @@ namespace T_Threads {
 		void* AllocateFromArena(size_t size);
 
 	private:
+		static TaskScheduler* instance;
 		Task* GetTask();
 		void StartPool(size_t poolSize);
 		void WaitOnEvent(const std::string& eventName);
 		bool PushLocal(Task* task, uint8_t cpuaffinity = 0);
 		bool PushToPQ(Task* task, uint8_t priority = 3);
 		bool PushToCore(size_t core_id, Task* task);
-		TaskScheduler(size_t poolSize = std::thread::hardware_concurrency() - 1);
+		TaskScheduler(size_t poolSize);
+		static size_t GetSafeTC();
 		int PickNextWorker();
 		std::unordered_map<std::string, std::unique_ptr<Event>> eventRegistry;
 		std::mutex registryMtx;

@@ -8,7 +8,7 @@ FiberPool::FiberPool(int count) : arena(count * 1024 * 1024) {
 		// Allocate the stack from the arena
 		void* stackMem = arena.AllocateStack(1024 * 1024);
 
-		// Initialize the Fiber
+		// Init the Fiber
 		allFibers[i].stackBase = stackMem;
 		allFibers[i].stackSize = 1024 * 1024;
 
