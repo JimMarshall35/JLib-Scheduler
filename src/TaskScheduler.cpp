@@ -316,18 +316,28 @@ Task* TaskScheduler::GetTask() {
 	Task* task_to_run = nullptr;
 	Task* task;
 
-	size_t numThreads = loPri.size();
+	size_t numThreads = hiPri.size();
 	size_t start = rand() % numThreads;
 	for (size_t i = 0; i < numThreads; ++i) {
 		size_t target = (start + i) % numThreads;
-		auto opt = loPri[target]->steal();
+		auto opt = hiPri[target]->steal();
 		if (opt) {
 			task_to_run = *opt;
-			current_task = task_to_run;
 			break;
 		}
 	}
-
+	if (!task_to_run) {
+		numThreads = loPri.size();
+		start = rand() % numThreads;
+		for (size_t i = 0; i < numThreads; ++i) {
+			size_t target = (start + i) % numThreads;
+			auto opt = loPri[target]->steal();
+			if (opt) {
+				task_to_run = *opt;
+				break;
+			}
+		}
+	}
 	return task_to_run;
 }
 
