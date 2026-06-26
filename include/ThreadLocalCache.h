@@ -34,23 +34,23 @@ namespace T_Threads {
         }
 
         Fiber* Pop() {
+            // 1. Refill if empty
             if (count == 0 && globalPool) {
-                // Use a small, fixed-size stack buffer to receive stolen tasks
-                // This is 100% stack-allocated, zero heap.
                 Fiber* temp[64];
                 size_t stolenCount = globalPool->StealInto(temp, 64);
 
                 for (size_t i = 0; i < stolenCount; ++i) {
-                    // Simply wrap-around push into your ring buffer
-                    localFibers[tail] = temp[i];
+                    localFibers[tail] = temp[i]; // Push to tail
                     tail = (tail + 1) % activeCapacity;
                     count++;
                 }
             }
 
-            // Standard Ring Buffer pop
+            // 2. Return nullptr if still empty
             if (count == 0) return nullptr;
 
+            // 3. Pop from the SAME end (LIFO)
+            // Decrement tail to get the most recently added fiber
             tail = (tail == 0) ? (activeCapacity - 1) : (tail - 1);
             Fiber* f = localFibers[tail];
             count--;

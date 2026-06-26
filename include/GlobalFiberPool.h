@@ -34,7 +34,6 @@ namespace T_Threads {
         size_t StealInto(Fiber** dest, size_t maxCount);
 
         // Bulk release: Return a batch of fibers
-        //void ReturnBatch(std::vector<Fiber*>& batch);
         void ReturnBatch(Fiber** fibers, size_t count);
         static void FiberEntryWrapper();
 
