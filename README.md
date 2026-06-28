@@ -47,6 +47,11 @@ auto* task = scheduler.CreateTask([]() {
     printf("Hello from task!\n");
 });
 
+-- if you want a task to be hi priority set HiPri to true when creating the task!
+its one of the CreateTask Parameters, autoset to false
+-- if you have a deep callstack set FiberSize to FiberSize::Heavy -- there are less
+heavy fibers than light fibers but heavy fibers get 512k stack vs 64
+
 // Or function pointer style
 void MyTask(void* data) { ... }
 Task* task = scheduler.CreateTask(MyTask, data);
