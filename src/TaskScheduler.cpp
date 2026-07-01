@@ -84,15 +84,23 @@ void TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function
 	if (totalItems > 10000) {
 		int numTasks = (totalItems + chunkSize - 1) / chunkSize;
 
-		// Holds only the tasks we successfully allocated.
-		Task** taskPtrs = new Task * [numTasks];
-		int created = 0;
+		// Chunk 0 is MAIN'S OWN LANE: the calling thread computes it as a plain inline call
+		// (NOT a scheduled task), so it can never suspend/resume and never touches a fiber or
+		// task slab. Chunks 1..numTasks-1 go to workers. This keeps all hw lanes busy without
+		// making the caller a task-runner -- the caller stays a pure waiter for scheduled work.
+		// See WaitFor for why the caller must not run scheduled tasks.
+		const int mainChunkStart = start;
+		const int mainChunkEnd = std::min(start + chunkSize, end);
 
+		// Only the worker chunks need Task allocations.
+		const int workerChunks = numTasks - 1;
+		Task** taskPtrs = (workerChunks > 0) ? new Task * [workerChunks] : nullptr;
+		int created = 0;
 		std::atomic<int> remaining{ 0 };
 
-		// 1. Create tasks. If the arena is exhausted (CreateTask returns nullptr),
-		//    run that chunk inline on the caller rather than dereferencing null.
-		for (int i = 0; i < numTasks; ++i) {
+		// 1. Create tasks for chunks 1..numTasks-1. If the arena is exhausted (CreateTask
+		//    returns nullptr), run that chunk inline rather than dereferencing null.
+		for (int i = 1; i < numTasks; ++i) {
 			int chunkStart = start + i * chunkSize;
 			int chunkEnd = std::min(chunkStart + chunkSize, end);
 
@@ -109,27 +117,23 @@ void TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function
 			taskPtrs[created++] = t;
 		}
 
+		// 2. Dispatch the worker chunks FIRST so they run CONCURRENTLY with main's own chunk.
 		if (created > 0) {
 			pendingTasks.fetch_add(created, std::memory_order_relaxed);
-
 
 			size_t n = loPriInboxes.size();
 			for (int i = 0; i < created; ++i) {
 				loPriInboxes[i % n]->push(taskPtrs[i]);
 			}
 			NotifyAll();
-
-			while (remaining.load(std::memory_order_acquire) > 0) {
-				Task* helped = GetTask();
-				if (helped) {
-					helped->Execute();
-					pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
-				}
-				else {
-					_mm_pause();
-				}
-			}
 		}
+
+		// 3. Main computes its own lane while the workers churn -- no wasted thread.
+		func(mainChunkStart, mainChunkEnd);
+
+		// 4. Then wait; the workers run AND free their tasks correctly.
+		while (remaining.load(std::memory_order_acquire) > 0)
+			std::this_thread::yield();
 
 		delete[] taskPtrs;
 	}
@@ -248,11 +252,15 @@ void TaskScheduler::RunCounted(WaitGroup& wg, Task* t) {
 }
 
 void TaskScheduler::WaitFor(WaitGroup& wg) {
-	while (wg.n.load(std::memory_order_acquire) > 0) {
-		Task* h = GetTask();
-		if (h) { h->Execute(); pendingTasks.fetch_sub(1, std::memory_order_acq_rel); }
-		else std::this_thread::yield();
-	}
+	// The caller (e.g. the main render thread) is NOT a worker: it has no fiber and no
+	// place to free a task's slab. Stealing + inline-running tasks here was a triple bug:
+	//   1. inline Execute() never runs ~Task()/Free() -> slab leak (the worker path frees).
+	//   2. GetTask() steals from the SAME deques workers pop from -> a last-element race can
+	//      hand one task to both, so two threads Reset()+record ONE command list -> GPU hang.
+	//   3. a stolen task that suspends/yields would deref a null currentFiber.
+	// Just wait; the workers run AND free these tasks correctly.
+	while (wg.n.load(std::memory_order_acquire) > 0)
+		std::this_thread::yield();
 }
 void T_Threads::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity)
 {
