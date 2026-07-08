@@ -460,7 +460,23 @@ bool TaskScheduler::Push(uint8_t cpu_affinity, Task* task) {
 
 bool TaskScheduler::PushFork(uint8_t cpu_affinity, Task* task) {
 	if (!task) return false;
-	return Push(cpu_affinity, task);
+	// MUST be PushToCore, not Push/PushLocal -- PushToCore is the ONLY path that sets
+	// immediateCoresInUse[idx], which is what actually protects the target core from further
+	// round-robin scheduling (PickNextWorker skips cores with this flag set) and is what makes a
+	// never-returning forked task (e.g. SoundManager's audio mixer, pinned here for the
+	// program's lifetime) correctly starve out new work forever instead of silently stranding
+	// whatever PickNextWorker happens to route there next. Thread::Worker() clears the flag when
+	// a forked task actually COMPLETES (both the fastJob and fiber-DEAD paths), so this also
+	// stays correct for short-lived forked tasks (e.g. TaskDAG's main-affinity nodes) -- busy
+	// only while genuinely in use, whether that's one frame or forever.
+	// Routing through Push (-> PushLocal) instead, as this used to, pushes straight into the
+	// target core's ORDINARY inbox with immediateCoresInUse never set -- PickNextWorker keeps
+	// treating that core as available and keeps assigning it new work, even once its thread is
+	// permanently stuck inside a never-returning fastJob task and can never process anything
+	// again. Any task that landed there was silently lost, which is exactly what caused
+	// SoundManager::Initialize()'s forked mix thread to hang the whole per-frame DAG (main
+	// thread's WaitForMain() blocks forever on a task stranded on the now-unresponsive core).
+	return PushToCore(cpu_affinity, task);
 }
 void TaskScheduler::WaitOnEventArmed(const std::string& eventName, const std::function<void()>& arm) {
 	auto* thread = Thread::GetCurrent();

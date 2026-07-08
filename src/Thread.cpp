@@ -308,7 +308,7 @@ void Thread::Worker() {
 							scheduler->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
 						}
 						else {
-							deque->push_bottom(t); // safety net: may suspend, can't force-finish here
+							scheduler->Requeue(t); // non-fastJob: requeue for stealing, can't force-finish here
 						}
 					}
 				};
