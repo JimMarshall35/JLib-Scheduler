@@ -10,17 +10,14 @@ namespace JLib {
         std::atomic<int> n{ 0 };
         std::mutex mtx;
         std::unordered_set<Task*> waiters;  // Tasks suspended on this WaitGroup
-        bool hasWaiters = false;
         void AddWaiter(Task* t) {
             std::lock_guard<std::mutex> lock(mtx);
             waiters.insert(t);
-            hasWaiters = true;
         }
 
         void RemoveWaiter(Task* t) {
             std::lock_guard<std::mutex> lock(mtx);
             waiters.erase(t);
-            if (waiters.empty()) hasWaiters = false;
         }
 
         void WakeAll();
@@ -63,8 +60,6 @@ namespace JLib {
 
         inline void Execute() noexcept {
             fn(data);
-            if (waitGroup) 
-                waitGroup->n.fetch_sub(1, std::memory_order_acq_rel);
         }
     };
     // One cache line, exactly -- if this fires, a new field pushed Task over 64 bytes and every

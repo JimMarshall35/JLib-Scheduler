@@ -169,7 +169,7 @@ void Thread::Worker() {
 				busy.store(true, std::memory_order_relaxed);
 				task_to_run->Execute();
 				if (task_to_run->waitGroup)
-					if (task_to_run->waitGroup->hasWaiters)
+					if (task_to_run->waitGroup->n.fetch_sub(1, std::memory_order_acq_rel) == 1)
 						task_to_run->waitGroup->WakeAll();
 				busy.store(false, std::memory_order_relaxed);
 				currentRunningTask = nullptr;
@@ -232,8 +232,8 @@ void Thread::Worker() {
 			{
 				ContextSwitch(&this->schedulerCtx, &f->ctx);
 				if (task_to_run->waitGroup)
-					if (task_to_run->waitGroup->hasWaiters)
-						task_to_run->waitGroup->WakeAll();
+					if (task_to_run->waitGroup->n.fetch_sub(1, std::memory_order_acq_rel) == 1)
+							task_to_run->waitGroup->WakeAll();
 			}
 			busy.store(false, std::memory_order_relaxed);
 
