@@ -3,22 +3,17 @@
 #include <atomic>
 #include <mutex>
 #include <unordered_set>
+
 namespace JLib {
     struct Fiber;
     struct Task;
+    struct DirectEvent;
     struct WaitGroup {
+        static constexpr int WAITER_BIT = 0x40000000;
+        static constexpr int COUNT_MASK = WAITER_BIT - 1;   // counts 
         std::atomic<int> n{ 0 };
         std::mutex mtx;
-        std::unordered_set<Task*> waiters;  // Tasks suspended on this WaitGroup
-        void AddWaiter(Task* t) {
-            std::lock_guard<std::mutex> lock(mtx);
-            waiters.insert(t);
-        }
-
-        void RemoveWaiter(Task* t) {
-            std::lock_guard<std::mutex> lock(mtx);
-            waiters.erase(t);
-        }
+        std::unordered_set<DirectEvent*> waiters;  // Tasks suspended on this WaitGroup
 
         void WakeAll();
     };

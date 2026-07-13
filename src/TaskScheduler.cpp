@@ -50,6 +50,13 @@ void TaskScheduler::ProcessMainThread() {
 	while (mainQ.pop(t)) {
 		if (!t) continue;
 		t->Execute();
+		if (t->waitGroup) {
+			if (t->waitGroup) {
+				int old = t->waitGroup->n.fetch_sub(1, std::memory_order_acq_rel);
+				if ((old & WaitGroup::COUNT_MASK) == 1 && (old & WaitGroup::WAITER_BIT))
+					t->waitGroup->WakeAll();   // only touches wg if someone registered
+			}
+		}
 		// Worker() frees a DEAD task after running it (see its FiberStatus::DEAD branch) --
 		// this path was missing the equivalent, so every PushMain'd task leaked its slab.
 		// Latent/unnoticed while PushMain was barely used; would leak fast once frame tasks
@@ -403,10 +410,16 @@ void TaskScheduler::RunCounted(WaitGroup& wg, Task* t) {
 
 void TaskScheduler::WaitFor(WaitGroup& wg) {
 	if (IsOnFiber()) {
-		Thread* current = Thread::GetCurrent();
-		Task* task = current->currentRunningTask;
-		wg.AddWaiter(task);
-		Thread::Suspend();  // Park until WakeAll resumes us
+		WaitOnEventDirectArmed([&wg](DirectEvent* ev) {
+			std::lock_guard<std::mutex> lock(wg.mtx);
+			wg.waiters.insert(ev);
+			int old = wg.n.fetch_or(WaitGroup::WAITER_BIT, std::memory_order_acq_rel);
+			if ((old & WaitGroup::COUNT_MASK) == 0) {
+				wg.waiters.erase(ev);
+				ev->Signal();   // already done -- wake ourselves so we don't park forever
+			}
+			});
+		return;
 	}
 	else {
 		while (wg.n.load(std::memory_order_acquire) > 0) {
@@ -614,6 +627,11 @@ bool TaskScheduler::TryRunStolenFastJob() {
 			continue;
 		}
 		task->Execute();
+		if (task->waitGroup) {
+			int old = task->waitGroup->n.fetch_sub(1, std::memory_order_acq_rel);
+			if ((old & WaitGroup::COUNT_MASK) == 1 && (old & WaitGroup::WAITER_BIT))
+				task->waitGroup->WakeAll();   // only touches wg if someone registered
+		}
 		task->~Task();
 		taskAllocator.Free(task);
 		pendingTasks.fetch_sub(1, std::memory_order_acq_rel);

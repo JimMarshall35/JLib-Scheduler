@@ -168,9 +168,11 @@ void Thread::Worker() {
 				currentRunningTask = task_to_run;
 				busy.store(true, std::memory_order_relaxed);
 				task_to_run->Execute();
-				if (task_to_run->waitGroup)
-					if (task_to_run->waitGroup->n.fetch_sub(1, std::memory_order_acq_rel) == 1)
-						task_to_run->waitGroup->WakeAll();
+				if (task_to_run->waitGroup) {
+					int old = task_to_run->waitGroup->n.fetch_sub(1, std::memory_order_acq_rel);
+					if ((old & WaitGroup::COUNT_MASK) == 1 && (old & WaitGroup::WAITER_BIT))
+						task_to_run->waitGroup->WakeAll();   // only touches wg if someone registered
+				}
 				busy.store(false, std::memory_order_relaxed);
 				currentRunningTask = nullptr;
 
@@ -231,18 +233,22 @@ void Thread::Worker() {
 			busy.store(true, std::memory_order_relaxed);
 			{
 				ContextSwitch(&this->schedulerCtx, &f->ctx);
-				if (task_to_run->waitGroup)
-					if (task_to_run->waitGroup->n.fetch_sub(1, std::memory_order_acq_rel) == 1)
-							task_to_run->waitGroup->WakeAll();
+	
 			}
 			busy.store(false, std::memory_order_relaxed);
 
 			FiberStatus fs = f->status.load(std::memory_order_acquire);
 			if (fs == FiberStatus::DEAD) {
 				// Completed for good
+				if (task_to_run->waitGroup) {
+					int old = task_to_run->waitGroup->n.fetch_sub(1, std::memory_order_acq_rel);
+					if ((old & WaitGroup::COUNT_MASK) == 1 && (old & WaitGroup::WAITER_BIT))
+						task_to_run->waitGroup->WakeAll();   // only touches wg if someone registered
+				}
 				bool was_forked = task_to_run->isForked;  // Save before destruction
 				task_to_run->assignedFiber = nullptr;
 				ReleaseFiber(f);
+
 				task_to_run->~Task();
 				scheduler->GetAllocator()->Free(task_to_run);
 				scheduler->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
